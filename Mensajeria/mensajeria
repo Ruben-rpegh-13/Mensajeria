@@ -1,0 +1,79 @@
+#!/bin/bash
+
+# 1. Preparación del entorno
+TMPDIR=$(mktemp -d)
+FIFO="$TMPDIR/fifo"
+mkfifo "$FIFO"
+
+# Limpieza total al salir (mata todos los procesos hijos)
+cleanup() {
+    rm -rf "$TMPDIR"
+    kill 0 2>/dev/null
+}
+trap cleanup EXIT
+
+# 2. Detección inteligente de la versión de Netcat
+NC_HELP=$(nc -h 2>&1 || nc --help 2>&1)
+if echo "$NC_HELP" | grep -q -- "-p"; then
+    NC_CMD() { nc -l -p "$1"; } # Versión Traditional
+else
+    NC_CMD() { nc -l "$1"; }    # Versión OpenBSD
+fi
+
+# 3. Selección de modo y configuración
+MODE=$(zenity --list --title="Chat Netcat" --text="Modo:" --radiolist \
+    --column="Sel" --column="Opción" TRUE "Servidor" FALSE "Cliente")
+[ -z "$MODE" ] && exit
+
+if [[ "$MODE" == "Servidor" ]]; then
+    PORT=$(zenity --entry --title="Puerto" --text="Escuchar en:" --entry-text="12345")
+    [ -z "$PORT" ] && exit
+else
+    IP=$(zenity --entry --title="IP" --text="IP del servidor:")
+    PORT=$(zenity --entry --title="Puerto" --text="Puerto:" --entry-text="12345")
+    [ -z "$IP" ] || [ -z "$PORT" ] && exit
+fi
+
+# Abrir el FIFO para lectura/escritura persistente
+exec 3<> "$FIFO"
+
+# 4. Hilo de RECEPCIÓN (Segundo plano)
+(
+    while true; do
+        if [[ "$MODE" == "Servidor" ]]; then
+            echo "_SYS_ Esperando conexión..."
+            NC_CMD "$PORT" <&3
+        else
+            echo "_SYS_ Conectando a $IP:$PORT..."
+            nc "$IP" "$PORT" <&3 || sleep 2
+        fi
+        echo "_SYS_ Conexión perdida. Reintentando..."
+    done
+) | while read -r line; do
+    [ -z "$line" ] && continue
+    
+    # Mostrar notificación de escritorio
+    zenity --notification --text="$line" 2>/dev/null
+
+    # Formatear salida en terminal
+    if [[ "$line" == _SYS_* ]]; then
+        echo -e "\e[33m${line#_SYS_ }\e[0m"
+    else
+        ROLE=$([[ "$MODE" == "Servidor" ]] && echo "Cliente" || echo "Servidor")
+        echo -e "\e[36m👤 $ROLE: $line\e[0m"
+    fi
+done &
+
+# 5. Bucle de ENVÍO (Primer plano)
+echo -e "\e[1;32mChat iniciado como $MODE. Usa la ventana emergente para escribir.\e[0m"
+while true; do
+    MSG=$(zenity --entry --title="Enviar Mensaje" --text="Mensaje:")
+    
+    # Si el usuario cierra la ventana o pulsa cancelar, salimos
+    [ $? -ne 0 ] && break
+
+    if [ -n "$MSG" ]; then
+        echo -e "\e[32m🟢 Tú: $MSG\e[0m"
+        echo "$MSG" >&3
+    fi
+done

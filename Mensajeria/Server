@@ -1,0 +1,75 @@
+import socket
+import threading
+
+HOST = "0.0.0.0"
+PORT = 12345
+
+clients = {}  
+# socket -> (nombre, ip)
+
+def broadcast(message, sender_socket=None):
+    """Envía mensaje a todos los clientes"""
+    for client in list(clients):
+        if client != sender_socket:
+            try:
+                client.send(message.encode())
+            except:
+                remove_client(client)
+
+def remove_client(client_socket):
+    if client_socket in clients:
+        name, ip = clients[client_socket]
+        print(f"[-] Desconectado: {name} ({ip})")
+        del clients[client_socket]
+    client_socket.close()
+
+def handle_client(client_socket, addr):
+    ip = addr[0]
+
+    # 1. Pedir nombre
+    client_socket.send("Introduce tu nombre: ".encode())
+    name = client_socket.recv(1024).decode().strip()
+
+    if not name:
+        name = "Anon"
+
+    clients[client_socket] = (name, ip)
+
+    print(f"[+] Conectado: {name} ({ip})")
+
+    broadcast(f"[SYSTEM] {name} se ha unido al chat")
+
+    # 2. Loop de mensajes
+    while True:
+        try:
+            msg = client_socket.recv(1024).decode()
+
+            if not msg:
+                break
+
+            full_msg = f"{name}@{ip}: {msg}"
+            print(full_msg)
+            broadcast(full_msg, client_socket)
+
+        except:
+            break
+
+    broadcast(f"[SYSTEM] {name} ha salido del chat", client_socket)
+    remove_client(client_socket)
+
+def start_server():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind((HOST, PORT))
+    server.listen()
+
+    print(f"Servidor LAN iniciado en puerto {PORT}")
+
+    while True:
+        client_socket, addr = server.accept()
+        thread = threading.Thread(
+            target=handle_client,
+            args=(client_socket, addr)
+        )
+        thread.start()
+
+start_server()
