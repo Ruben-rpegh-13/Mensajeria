@@ -1,101 +1,137 @@
 import socket
 import threading
+from datetime import datetime
 
-# Configuración
-HOST = "192.168.0.47"
+# ==================== CONFIGURACIÓN ====================
+HOST = "0.0.0.0"      # Escucha en toda la red local
 PORT = 12345
 
 # Recursos compartidos y Thread Safety
-clients = {}  # socket -> (nombre, ip)
-clients_lock = threading.Lock()
+clients = {}                      # socket -> (nombre, ip)
+clients_lock = threading.RLock()  # RLock evita deadlock
 
-def broadcast(message, sender_socket=None):
-    """Envía mensaje a todos los clientes de forma segura."""
+
+def log(msg: str):
+    """Logging con timestamp para monitorear el servidor."""
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+
+
+def broadcast(message: str, sender_socket=None):
+    """Envía un mensaje a todos excepto al remitente."""
     msg_bytes = message.encode('utf-8')
-    
+
     with clients_lock:
-        # Iteramos sobre una copia de las llaves para poder borrar si falla
-        for client in list(clients.keys()):
-            if client != sender_socket:
-                try:
-                    client.send(msg_bytes)
-                except (BrokenPipeError, ConnectionResetError, OSError):
-                    remove_client(client)
+        for client_socket in list(clients.keys()):
+            if client_socket == sender_socket:
+                continue
+            try:
+                client_socket.sendall(msg_bytes)
+            except (OSError, ConnectionResetError):
+                # Limpieza silenciosa si el envío falla
+                _internal_remove(client_socket)
+
+
+def _internal_remove(client_socket):
+    """Lógica interna de limpieza (debe llamarse CON el lock adquirido)."""
+    if client_socket in clients:
+        name, ip = clients.pop(client_socket)
+        log(f"[-] Desconectado: {name} ({ip})")
+        try:
+            client_socket.close()
+        except OSError:
+            pass
+        return name
+    return None
+
 
 def remove_client(client_socket):
-    """Elimina al cliente del diccionario y cierra el socket."""
+    """Interfaz pública para eliminar clientes con seguridad de hilos."""
     with clients_lock:
-        if client_socket in clients:
-            name, ip = clients[client_socket]
-            print(f"[-] Desconectado: {name} ({ip})")
-            del clients[client_socket]
-            try:
-                client_socket.close()
-            except OSError:
-                pass
+        return _internal_remove(client_socket)
+
 
 def handle_client(client_socket, addr):
     ip = addr[0]
     name = "Anon"
-    
+
     try:
-        # 1. Fase de Handshake (Nombre)
-        client_socket.send("Introduce tu nombre: ".encode('utf-8'))
+        # 1. Handshake - Registro de usuario
+        client_socket.sendall(b"Introduce tu nombre: ")
         data = client_socket.recv(1024)
         if not data:
-            client_socket.close()
             return
-            
-        name = data.decode('utf-8').strip() or "Anon"
-        
+
+        # Nombre limpio y limitado
+        raw_name = data.decode('utf-8', errors='ignore').strip()[:20] or "Anon"
+
         with clients_lock:
+            # Garantizar nombre único (todo dentro del mismo lock)
+            name = raw_name
+            counter = 1
+            existing_names = [n for n, _ in clients.values()]
+            while name in existing_names:
+                name = f"{raw_name}_{counter}"
+                counter += 1
             clients[client_socket] = (name, ip)
-        
-        print(f"[+] Conectado: {name} ({ip})")
+
+        log(f"[+] Conectado: {name} ({ip})")
         broadcast(f"📢 [SYSTEM] {name} se ha unido al chat")
 
-        # 2. Loop de mensajes
+        # Activamos timeout SOLO después del handshake
+        client_socket.settimeout(300)  # 5 minutos de inactividad
+
+        # 2. Bucle principal de mensajes
         while True:
             data = client_socket.recv(1024)
             if not data:
                 break
-                
-            msg = data.decode('utf-8')
-            full_msg = f"{name}@{ip}: {msg}"
-            print(full_msg)
-            broadcast(full_msg, client_socket)
 
-    except (ConnectionResetError, UnicodeDecodeError):
-        pass # Errores comunes de desconexión o caracteres extraños
+            msg = data.decode('utf-8', errors='ignore').strip()[:256]
+            if msg:
+                full_msg = f"{name}@{ip}: {msg}"
+                log(full_msg)
+                broadcast(full_msg, client_socket)
+
+    except socket.timeout:
+        log(f"[!] Timeout por inactividad: {name} ({ip})")
+    except (ConnectionResetError, OSError):
+        pass  # desconexiones normales
     finally:
-        # Aseguramos que el cliente sea removido y se avise a los demás
-        remove_client(client_socket)
-        broadcast(f"🚫 [SYSTEM] {name} ha salido del chat")
+        # Limpieza siempre
+        removed_name = remove_client(client_socket)
+        if removed_name:
+            broadcast(f"🚫 [SYSTEM] {removed_name} ha salido del chat")
+
+        # Cerramos el socket siempre (por si nunca se registró)
+        try:
+            client_socket.close()
+        except (OSError, AttributeError):
+            pass
+
 
 def start_server():
-    # Usamos contexto 'with' para asegurar que el socket se cierre al terminar
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
-        # SO_REUSEADDR permite reiniciar el servidor sin esperar al kernel
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        
+
         try:
             server.bind((HOST, PORT))
-            server.listen()
-            print(f"🚀 Servidor LAN iniciado en {HOST}:{PORT}")
-            print("Presiona Ctrl+C para detener.")
+            server.listen(20)  # Más conexiones simultáneas en LAN
+            log(f"🚀 Servidor LAN iniciado en {HOST}:{PORT}")
+            log("Presiona Ctrl+C para detener.\n")
 
             while True:
-                client_socket, addr = server.accept()
-                thread = threading.Thread(
+                conn, addr = server.accept()
+                threading.Thread(
                     target=handle_client,
-                    args=(client_socket, addr),
-                    daemon=True # El hilo muere si el programa principal se cierra
-                )
-                thread.start()
+                    args=(conn, addr),
+                    daemon=True
+                ).start()
+
         except KeyboardInterrupt:
-            print("\nTerminando servidor...")
+            log("\n⛔ Servidor detenido por el administrador.")
         except Exception as e:
-            print(f"Error crítico en el servidor: {e}")
+            log(f"❌ Error crítico: {e}")
+
 
 if __name__ == "__main__":
     start_server()
