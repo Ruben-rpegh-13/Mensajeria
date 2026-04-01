@@ -1,69 +1,119 @@
 import socket
 import threading
 import sys
+import argparse
 
-# ==================== CONFIGURACIÓN ====================
-SERVER_HOST = "127.0.0.1"  # Cambia a tu IP LAN
-PORT = 12345
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 12345
+BUFFER_SIZE = 8192
 
-stop_flag = False  # Para terminar el hilo de escucha
 
-def listen_for_messages(client_socket):
-    """Hilo para recibir mensajes del servidor."""
-    global stop_flag
-    while not stop_flag:
+def listen_for_messages(client_socket: socket.socket, stop_event: threading.Event):
+    buffer = ""
+
+    while not stop_event.is_set():
         try:
-            message = client_socket.recv(1024).decode('utf-8')
-            if not message:
-                print("\n[!] El servidor cerró la conexión.")
-                stop_flag = True
+            data = client_socket.recv(BUFFER_SIZE)
+
+            if not data:
+                print("\n[!] Conexión cerrada por el servidor.")
                 break
-            print(f"\r{message}\n> ", end="")
+
+            buffer += data.decode('utf-8', errors='replace')
+
+            while "\n" in buffer:
+                mensaje, buffer = buffer.split("\n", 1)
+
+                sys.stdout.write("\r\033[K")
+                print(mensaje)
+                sys.stdout.write("> ")
+                sys.stdout.flush()
+
+        except socket.timeout:
+            # 👈 NO cerrar conexión por timeout
+            continue
+
         except (ConnectionResetError, OSError):
             print("\n[!] Conexión perdida con el servidor.")
-            stop_flag = True
             break
 
+    stop_event.set()
+    print("\n[!] Hilo de recepción finalizado.")
+
+
 def start_client():
-    global stop_flag
+    parser = argparse.ArgumentParser(description="Cliente de chat LAN")
+    parser.add_argument("--host", default=DEFAULT_HOST)
+    parser.add_argument("-p", "--port", type=int, default=DEFAULT_PORT)
+    args = parser.parse_args()
+
     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    
+
+    # 🔥 mejora clave VS Code / sockets
+    client.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+    # 🔥 timeout no bloqueante
+    client.settimeout(1)
+
     try:
-        client.connect((SERVER_HOST, PORT))
-    except ConnectionRefusedError:
-        print(f"❌ No se encontró el servidor en {SERVER_HOST}:{PORT}.")
+        client.connect((args.host, args.port))
+        print(f"✅ Conectado a {args.host}:{args.port}")
+    except Exception as e:
+        print(f"❌ Error de conexión: {e}")
         return
 
-    # 1. Registro (Handshake)
-    prompt = client.recv(1024).decode('utf-8')
-    name = input(prompt).strip()[:20] or "Anon"
-    client.sendall(name.encode('utf-8'))
+    # 👇 evitar bloqueo en recv inicial
+    name = input("Introduce tu nombre: ").strip() or "Anon"
+    client.sendall((name + "\n").encode('utf-8'))
 
-    # 2. Hilo de recepción
-    threading.Thread(target=listen_for_messages, args=(client,), daemon=True).start()
+    stop_event = threading.Event()
 
-    print("\n--- CHAT CONECTADO ---")
-    print("Escribe tus mensajes y pulsa Enter. Para salir escribe 'exit'.\n")
+    thread = threading.Thread(
+        target=listen_for_messages,
+        args=(client, stop_event),
+        daemon=True
+    )
+    thread.start()
 
-    # 3. Bucle de envío
+    print("\n" + "═" * 60)
+    print("🎉 CHAT LAN ACTIVO")
+    print("   /msg <usuario> <mensaje>")
+    print("   exit / salir")
+    print("═" * 60 + "\n")
+
     try:
-        while not stop_flag:
-            msg = input("> ")
-            if msg.lower() == "exit":
-                stop_flag = True
+        while not stop_event.is_set():
+            try:
+                msg = input("> ")
+            except EOFError:
                 break
+
+            if msg.lower() in {"exit", "salir", "quit"}:
+                break
+
+            if msg.startswith("/msg "):
+                parts = msg.split(" ", 2)
+                if len(parts) < 3:
+                    print("❌ Uso: /msg usuario mensaje")
+                    continue
+
             if msg.strip():
-                try:
-                    client.sendall(msg.encode('utf-8'))
-                except (OSError, ConnectionResetError):
-                    print("\n[!] Error enviando mensaje. Conexión perdida.")
-                    stop_flag = True
-                    break
+                client.sendall((msg + "\n").encode('utf-8'))
+
     except KeyboardInterrupt:
-        stop_flag = True
+        print("\n[!] Interrumpido por el usuario.")
+
     finally:
+        stop_event.set()
+
+        try:
+            client.shutdown(socket.SHUT_RDWR)
+        except:
+            pass
+
         client.close()
-        print("\n👋 Te has desconectado del chat.")
+        print("\n👋 Te has desconectado.")
+
 
 if __name__ == "__main__":
     start_client()
