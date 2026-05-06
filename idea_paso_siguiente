@@ -1,0 +1,16 @@
+[Servidor]
+   ├── TCP chat (12345)
+   └── UDP broadcast (54321)
+
+[Clientes]
+   ├── escuchan UDP
+   └── se conectan solos por TCP
+
+
+   2: enp0s3: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP group default qlen 1000
+    link/ether 08:00:27:3a:d6:18 brd ff:ff:ff:ff:ff:ff
+    altname enx0800273ad618
+    inet 192.168.0.47/24 brd 192.168.0.255 scope global dynamic noprefixroute enp0s3
+       valid_lft 72325sec preferred_lft 72325sec
+    inet6 fe80::11ef:5670:44e4:feeb/64 scope link noprefixroute 
+       valid_lft forever preferred_lft forever
