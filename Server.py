@@ -299,6 +299,9 @@ def admin_console(server_socket: socket.socket) -> None:
         # ── /kick ─────────────────────────────────────────────────────────────
         if lower.startswith("/kick "):
             target_name = command.split(maxsplit=1)[1].strip()
+            if not target_name:
+                print("❌ Uso: /kick <usuario>")
+                continue
             target_socket = find_client_by_name(target_name)
             if not target_socket:
                 print(f"❌ Usuario '{target_name}' no encontrado.")
