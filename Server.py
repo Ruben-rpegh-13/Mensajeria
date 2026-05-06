@@ -1,6 +1,7 @@
 import socket
 import threading
 import re
+import time
 from datetime import datetime
 from typing import Dict, Tuple
 
@@ -13,6 +14,8 @@ MAX_CLIENTS      = 50
 IDLE_TIMEOUT     = 300
 MAX_BUFFER_ACCUM = 65536
 RESERVED_NAMES   = {"SYSTEM", "ADMIN", "SERVIDOR"}
+MAX_MSGS_PER_SEC = 9
+RATE_BURST_MAX = 9
 
 clients: Dict[socket.socket, Tuple[str, str]] = {}
 clients_lock = threading.RLock()
@@ -196,7 +199,11 @@ def handle_client(client_socket: socket.socket, addr: tuple) -> None:
         if not raw_name:
             return
 
-        raw_name = re.sub(r"[^\w\-]", "", raw_name)[:32] or "Anon"
+        raw_name = re.sub(r"[^\w\-]", "", raw_name)[:32]
+        if not raw_name:
+            send(client_socket, "❌ Nombre inválido.")
+            return
+
         if raw_name.upper() in RESERVED_NAMES:
             raw_name = "User"
 
@@ -220,6 +227,10 @@ def handle_client(client_socket: socket.socket, addr: tuple) -> None:
 
         buffer = _flush_buffer(client_socket, pending)
 
+        # ── Rate limiting (token bucket) ────────────────────────────────────────
+        last_check = time.time()
+        msg_burst = RATE_BURST_MAX
+
         # ── Loop principal ────────────────────────────────────────────────────
         client_socket.settimeout(IDLE_TIMEOUT)
 
@@ -241,6 +252,20 @@ def handle_client(client_socket: socket.socket, addr: tuple) -> None:
                 send(client_socket, "❌ Buffer excedido. Desconectando.")
                 break
 
+            # Rate limiting (token bucket) antes de procesar
+            now = time.time()
+            elapsed = now - last_check
+            msg_burst = max(0.0, msg_burst - elapsed * MAX_MSGS_PER_SEC)
+            last_check = now
+
+            if msg_burst >= RATE_BURST_MAX:
+                send(client_socket, "❌ Demasiados mensajes. Espera un momento...")
+                time.sleep(1)
+                msg_burst = max(0.0, msg_burst - MAX_MSGS_PER_SEC)
+                last_check = time.time()
+                continue
+
+            msg_burst += 1
             buffer = _flush_buffer(client_socket, buffer)
 
     finally:
